@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 60
 
+    tesseract_cmd: str = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    upload_dir: str = "uploads"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

@@ -1,50 +1,38 @@
 from logging.config import fileConfig
 
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
-
+from sqlalchemy import engine_from_config, pool
 from alembic import context
 
 from app.core.config import settings
 from app.db.base import Base
+
+# Import every SQLAlchemy model so Alembic can discover its table.
 from app.models.user import User  # noqa: F401
+from app.models.document import Document  # noqa: F401
+from app.models.extracted_field import ExtractedField  # noqa: F401
+from app.models.validation_issue import ValidationIssue  # noqa: F401
+from app.models.correction import Correction  # noqa: F401
+from app.models.audit_event import AuditEvent  # noqa: F401
 
 
-# Alembic Config object
 config = context.config
 
-# Load the database URL from our application settings (.env)
-# instead of storing database credentials in alembic.ini
+# Use the database URL from .env instead of storing
+# credentials inside alembic.ini.
 config.set_main_option(
     "sqlalchemy.url",
     settings.database_url,
 )
 
-
-# Configure logging using alembic.ini
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 
-# Give Alembic access to our SQLAlchemy models
 target_metadata = Base.metadata
 
 
-# Temporary diagnostic:
-# This lets us verify that Alembic can see our models.
-print(
-    "ALEMBIC METADATA TABLES:",
-    list(target_metadata.tables.keys()),
-)
-
-
 def run_migrations_offline() -> None:
-    """
-    Run migrations in offline mode.
-
-    Alembic generates SQL without creating a live
-    connection to PostgreSQL.
-    """
+    """Run migrations without a live database connection."""
 
     url = config.get_main_option("sqlalchemy.url")
 
@@ -61,12 +49,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    """
-    Run migrations in online mode.
-
-    Alembic connects directly to PostgreSQL and compares
-    the current database schema with our SQLAlchemy models.
-    """
+    """Run migrations using a live PostgreSQL connection."""
 
     connectable = engine_from_config(
         config.get_section(
