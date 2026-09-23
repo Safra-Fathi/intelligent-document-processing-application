@@ -27,6 +27,12 @@ interface ExtractedField {
     field_name: string;
     original_value: string | null;
     confidence: number | null;
+
+    // Latest human correction returned by the backend.
+    corrected_value: string | null;
+    correction_reason: string | null;
+    corrected_at: string | null;
+    corrected_by_user_id: number | null;
 }
 
 interface ValidationIssue {
@@ -68,6 +74,17 @@ export default function DocumentDetails() {
     const [error, setError] =
         useState("");
 
+    // Preview state.
+    const [previewUrl, setPreviewUrl] =
+        useState<string | null>(null);
+
+    const [previewLoading, setPreviewLoading] =
+        useState(true);
+
+    const [previewError, setPreviewError] =
+        useState("");
+
+    // Correction state.
     const [editingFieldId, setEditingFieldId] =
         useState<number | null>(null);
 
@@ -109,9 +126,50 @@ export default function DocumentDetails() {
         }
     };
 
+    const loadPreview = async () => {
+        try {
+            setPreviewLoading(true);
+            setPreviewError("");
+
+            const response = await api.get(
+                `/documents/${documentId}/file`,
+                {
+                    responseType: "blob",
+                }
+            );
+
+            const objectUrl = URL.createObjectURL(
+                response.data
+            );
+
+            setPreviewUrl(objectUrl);
+        } catch (err: any) {
+            setPreviewError(
+                err.response?.data?.detail ||
+                "Unable to load document preview."
+            );
+        } finally {
+            setPreviewLoading(false);
+        }
+    };
+
     useEffect(() => {
         loadData();
+        loadPreview();
+
+        return () => {
+            // Cleanup is also performed when previewUrl changes
+            // in the dedicated effect below.
+        };
     }, [documentId]);
+
+    useEffect(() => {
+        return () => {
+            if (previewUrl) {
+                URL.revokeObjectURL(previewUrl);
+            }
+        };
+    }, [previewUrl]);
 
     const formatConfidence = (
         value: number | null
@@ -163,11 +221,19 @@ export default function DocumentDetails() {
     ) => {
         setEditingFieldId(field.id);
 
+        // If this field was already corrected, start from
+        // the latest human-reviewed value rather than the
+        // original model output.
         setCorrectedValue(
-            field.original_value || ""
+            field.corrected_value ??
+            field.original_value ??
+            ""
         );
 
-        setCorrectionReason("");
+        setCorrectionReason(
+            field.correction_reason ?? ""
+        );
+
         setCorrectionMessage("");
     };
 
@@ -257,6 +323,15 @@ export default function DocumentDetails() {
     const isProcessed =
         document.processing_status ===
         "COMPLETED";
+
+    const isPdf =
+        document.mime_type ===
+        "application/pdf";
+
+    const isImage =
+        document.mime_type.startsWith(
+            "image/"
+        );
 
     return (
         <div className="details-page">
@@ -350,6 +425,67 @@ export default function DocumentDetails() {
                     </div>
                 </section>
 
+                {/* Document preview */}
+
+                <section className="result-section">
+                    <div className="section-heading">
+                        <div>
+                            <h3>
+                                Document preview
+                            </h3>
+
+                            <p className="muted">
+                                Original document uploaded
+                                for processing.
+                            </p>
+                        </div>
+                    </div>
+
+                    {previewLoading && (
+                        <div className="empty-state">
+                            Loading document preview...
+                        </div>
+                    )}
+
+                    {!previewLoading &&
+                        previewError && (
+                            <div className="error-box">
+                                {previewError}
+                            </div>
+                        )}
+
+                    {!previewLoading &&
+                        !previewError &&
+                        previewUrl && (
+                            <div className="document-preview">
+                                {isPdf && (
+                                    <iframe
+                                        src={previewUrl}
+                                        title={`Preview of ${document.original_filename}`}
+                                        className="pdf-preview"
+                                    />
+                                )}
+
+                                {isImage && (
+                                    <img
+                                        src={previewUrl}
+                                        alt={`Preview of ${document.original_filename}`}
+                                        className="image-preview"
+                                    />
+                                )}
+
+                                {!isPdf &&
+                                    !isImage && (
+                                        <div className="empty-state">
+                                            Preview is not
+                                            available for this
+                                            file type.
+                                        </div>
+                                    )}
+                            </div>
+                        )}
+                </section>
+
                 {/* Processing errors */}
 
                 {document.processing_status ===
@@ -386,9 +522,9 @@ export default function DocumentDetails() {
                                 </h3>
 
                                 <p className="muted">
-                                    Review AI-extracted
-                                    values and correct them
-                                    when necessary.
+                                    The original model output
+                                    is preserved separately
+                                    from human corrections.
                                 </p>
                             </div>
                         </div>
@@ -410,14 +546,26 @@ export default function DocumentDetails() {
                                     <thead>
                                         <tr>
                                             <th>Field</th>
+
                                             <th>
                                                 Original value
                                             </th>
+
+                                            <th>
+                                                Current value
+                                            </th>
+
                                             <th>
                                                 Confidence
                                             </th>
-                                            <th>Review</th>
-                                            <th>Action</th>
+
+                                            <th>
+                                                Review
+                                            </th>
+
+                                            <th>
+                                                Action
+                                            </th>
                                         </tr>
                                     </thead>
 
@@ -428,6 +576,14 @@ export default function DocumentDetails() {
                                                     getConfidenceLevel(
                                                         field.confidence
                                                     );
+
+                                                const hasCorrection =
+                                                    field.corrected_value !==
+                                                    null;
+
+                                                const currentValue =
+                                                    field.corrected_value ??
+                                                    field.original_value;
 
                                                 return (
                                                     <Fragment
@@ -445,6 +601,41 @@ export default function DocumentDetails() {
                                                             <td>
                                                                 {field.original_value ||
                                                                     "Not found"}
+                                                            </td>
+
+                                                            <td>
+                                                                <div className="current-value-cell">
+                                                                    <span>
+                                                                        {currentValue ||
+                                                                            "Not found"}
+                                                                    </span>
+
+                                                                    {hasCorrection && (
+                                                                        <span className="corrected-badge">
+                                                                            Corrected
+                                                                        </span>
+                                                                    )}
+
+                                                                    {hasCorrection &&
+                                                                        field.correction_reason && (
+                                                                            <small className="correction-note">
+                                                                                Reason:{" "}
+                                                                                {
+                                                                                    field.correction_reason
+                                                                                }
+                                                                            </small>
+                                                                        )}
+
+                                                                    {hasCorrection &&
+                                                                        field.corrected_at && (
+                                                                            <small className="correction-note">
+                                                                                Corrected:{" "}
+                                                                                {formatDate(
+                                                                                    field.corrected_at
+                                                                                )}
+                                                                            </small>
+                                                                        )}
+                                                                </div>
                                                             </td>
 
                                                             <td>
@@ -471,7 +662,9 @@ export default function DocumentDetails() {
                                                                         )
                                                                     }
                                                                 >
-                                                                    Correct
+                                                                    {hasCorrection
+                                                                        ? "Correct again"
+                                                                        : "Correct"}
                                                                 </button>
                                                             </td>
                                                         </tr>
@@ -481,7 +674,7 @@ export default function DocumentDetails() {
                                                                 <tr>
                                                                     <td
                                                                         colSpan={
-                                                                            5
+                                                                            6
                                                                         }
                                                                         className="correction-cell"
                                                                     >

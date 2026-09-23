@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    UploadFile,
+    status,
+)
 from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -127,9 +133,10 @@ def get_document(
 
     return document
 
+
 # ---------------------------------------------------------
-# Get original uploaded file for preview
-# Protected by document ownership
+# Get original uploaded document
+# Protected preview endpoint
 # ---------------------------------------------------------
 
 @router.get("/{document_id}/file")
@@ -138,7 +145,6 @@ def get_document_file(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    # Verify that the authenticated user owns the document.
     document = db.scalar(
         select(Document).where(
             Document.id == document_id,
@@ -152,7 +158,6 @@ def get_document_file(
             detail="Document not found.",
         )
 
-    # Resolve the private stored file.
     file_path = Path(UPLOAD_DIR) / document.stored_filename
 
     if not file_path.exists() or not file_path.is_file():
@@ -161,14 +166,14 @@ def get_document_file(
             detail="Stored document file was not found.",
         )
 
-    # Serve inline so the frontend can display PDFs/images
-    # without exposing the private upload directory directly.
     return FileResponse(
         path=file_path,
         media_type=document.mime_type,
         filename=document.original_filename,
         content_disposition_type="inline",
     )
+
+
 # ---------------------------------------------------------
 # Process uploaded document
 # OCR -> classification -> extraction -> validation
@@ -183,6 +188,10 @@ def process_uploaded_document(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    # -----------------------------------------------------
+    # Verify document ownership
+    # -----------------------------------------------------
+
     document = db.scalar(
         select(Document).where(
             Document.id == document_id,
@@ -196,13 +205,59 @@ def process_uploaded_document(
             detail="Document not found.",
         )
 
+    # -----------------------------------------------------
+    # Protect human correction history
+    # -----------------------------------------------------
+    #
+    # Reprocessing replaces the previous ExtractedField
+    # records.
+    #
+    # Corrections reference those records, so allowing
+    # destructive reprocessing after human review could
+    # remove correction history.
+    #
+    # For this MVP, documents containing human corrections
+    # cannot be reprocessed.
+    # -----------------------------------------------------
+
+    existing_correction = db.scalar(
+        select(Correction)
+        .join(
+            ExtractedField,
+            Correction.extracted_field_id == ExtractedField.id,
+        )
+        .where(
+            ExtractedField.document_id == document.id
+        )
+        .limit(1)
+    )
+
+    if existing_correction is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "This document contains human corrections "
+                "and cannot be reprocessed because doing so "
+                "would replace the extraction records linked "
+                "to its correction history."
+            ),
+        )
+
+    # -----------------------------------------------------
+    # Locate stored document
+    # -----------------------------------------------------
+
     file_path = Path(UPLOAD_DIR) / document.stored_filename
 
-    if not file_path.exists():
+    if not file_path.exists() or not file_path.is_file():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Stored document file was not found.",
         )
+
+    # -----------------------------------------------------
+    # Mark processing as started
+    # -----------------------------------------------------
 
     document.processing_status = "PROCESSING"
 
@@ -218,12 +273,108 @@ def process_uploaded_document(
     db.commit()
 
     try:
+        # -------------------------------------------------
+        # Run OCR / classification / extraction /
+        # business-rule validation pipeline
+        # -------------------------------------------------
+
         result = process_document(
             file_path=file_path,
             mime_type=document.mime_type,
         )
 
-        # Remove previous extraction results if reprocessed.
+        # -------------------------------------------------
+        # Duplicate document-number validation
+        # -------------------------------------------------
+        #
+        # This rule requires access to previously processed
+        # documents in PostgreSQL, so it belongs in the
+        # persistence/application layer rather than the
+        # pure pipeline validator.
+        #
+        # Duplicate checking is scoped to the authenticated
+        # user's documents.
+        # -------------------------------------------------
+
+        extracted_document_number = next(
+            (
+                field["value"]
+                for field in result["fields"]
+                if (
+                    field["field_name"] == "document_number"
+                    and field["value"]
+                )
+            ),
+            None,
+        )
+
+        if extracted_document_number:
+            normalized_document_number = (
+                extracted_document_number
+                .strip()
+                .upper()
+            )
+
+            possible_duplicates = db.scalars(
+                select(ExtractedField)
+                .join(
+                    Document,
+                    ExtractedField.document_id == Document.id,
+                )
+                .where(
+                    Document.user_id == current_user.id,
+                    Document.id != document.id,
+                    Document.processing_status == "COMPLETED",
+                    ExtractedField.field_name == "document_number",
+                    ExtractedField.original_value.is_not(None),
+                )
+            ).all()
+
+            duplicate_field = next(
+                (
+                    field
+                    for field in possible_duplicates
+                    if (
+                        field.original_value
+                        and field.original_value
+                        .strip()
+                        .upper()
+                        == normalized_document_number
+                    )
+                ),
+                None,
+            )
+
+            if duplicate_field is not None:
+                result["validation_issues"].append(
+                    {
+                        "field_name": "document_number",
+                        "issue_code":
+                            "DUPLICATE_DOCUMENT_NUMBER",
+                        "severity": "ERROR",
+                        "message": (
+                            "Another processed document "
+                            "with document number "
+                            f"'{extracted_document_number}' "
+                            "already exists for this user."
+                        ),
+                    }
+                )
+
+                # Duplicate documents must be reviewed
+                # manually even if ML confidence is high.
+                result["review_status"] = (
+                    "MANUAL_REQUIRED"
+                )
+
+        # -------------------------------------------------
+        # Remove previous machine-generated results
+        # -------------------------------------------------
+        #
+        # Documents containing human corrections were
+        # already blocked above.
+        # -------------------------------------------------
+
         previous_fields = db.scalars(
             select(ExtractedField).where(
                 ExtractedField.document_id == document.id
@@ -244,7 +395,10 @@ def process_uploaded_document(
 
         db.flush()
 
-        # Save extracted fields.
+        # -------------------------------------------------
+        # Save extracted fields
+        # -------------------------------------------------
+
         field_records = []
 
         for field in result["fields"]:
@@ -258,7 +412,10 @@ def process_uploaded_document(
             db.add(record)
             field_records.append(record)
 
-        # Save validation issues.
+        # -------------------------------------------------
+        # Save validation issues
+        # -------------------------------------------------
+
         issue_records = []
 
         for issue in result["validation_issues"]:
@@ -273,16 +430,36 @@ def process_uploaded_document(
             db.add(record)
             issue_records.append(record)
 
-        # Update document processing result.
-        document.predicted_type = result["predicted_type"]
+        # -------------------------------------------------
+        # Update document processing result
+        # -------------------------------------------------
+
+        document.predicted_type = result[
+            "predicted_type"
+        ]
+
         document.classification_confidence = result[
             "classification_confidence"
         ]
-        document.review_status = result["review_status"]
-        document.pipeline_version = result["pipeline_version"]
-        document.classifier_version = result["classifier_version"]
+
+        document.review_status = result[
+            "review_status"
+        ]
+
+        document.pipeline_version = result[
+            "pipeline_version"
+        ]
+
+        document.classifier_version = result[
+            "classifier_version"
+        ]
+
         document.processing_status = "COMPLETED"
         document.error_message = None
+
+        # -------------------------------------------------
+        # Audit successful processing
+        # -------------------------------------------------
 
         db.add(
             AuditEvent(
@@ -291,7 +468,8 @@ def process_uploaded_document(
                 event_type="PROCESSING_COMPLETED",
                 details=(
                     f"Type={document.predicted_type}; "
-                    f"confidence={document.classification_confidence}; "
+                    f"confidence="
+                    f"{document.classification_confidence}; "
                     f"review={document.review_status}"
                 ),
             )
@@ -325,6 +503,8 @@ def process_uploaded_document(
 
         if document is not None:
             document.processing_status = "FAILED"
+
+            # Store a bounded internal error message.
             document.error_message = str(exc)[:500]
 
             db.add(
@@ -338,6 +518,8 @@ def process_uploaded_document(
 
             db.commit()
 
+        # Do not expose the internal exception to the
+        # external API consumer.
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Document processing failed.",
@@ -358,7 +540,10 @@ def get_document_result(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    # Ownership check.
+    # -----------------------------------------------------
+    # Verify ownership
+    # -----------------------------------------------------
+
     document = db.scalar(
         select(Document).where(
             Document.id == document_id,
@@ -372,6 +557,10 @@ def get_document_result(
             detail="Document not found.",
         )
 
+    # -----------------------------------------------------
+    # Load extracted fields
+    # -----------------------------------------------------
+
     fields = db.scalars(
         select(ExtractedField)
         .where(
@@ -384,7 +573,7 @@ def get_document_result(
 
     for field in fields:
         # A field may have several historical corrections.
-        # The result screen displays the newest one.
+        # Display the newest correction as the current value.
         latest_correction = db.scalar(
             select(Correction)
             .where(
@@ -404,22 +593,24 @@ def get_document_result(
                 "original_value": field.original_value,
                 "confidence": field.confidence,
 
-                # Human correction information.
                 "corrected_value": (
                     latest_correction.corrected_value
                     if latest_correction
                     else None
                 ),
+
                 "correction_reason": (
                     latest_correction.reason
                     if latest_correction
                     else None
                 ),
+
                 "corrected_at": (
                     latest_correction.created_at
                     if latest_correction
                     else None
                 ),
+
                 "corrected_by_user_id": (
                     latest_correction.user_id
                     if latest_correction
@@ -427,6 +618,10 @@ def get_document_result(
                 ),
             }
         )
+
+    # -----------------------------------------------------
+    # Load validation issues
+    # -----------------------------------------------------
 
     validation_issues = db.scalars(
         select(ValidationIssue)
@@ -459,7 +654,10 @@ def create_field_correction(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    # Verify document ownership.
+    # -----------------------------------------------------
+    # Verify document ownership
+    # -----------------------------------------------------
+
     document = db.scalar(
         select(Document).where(
             Document.id == document_id,
@@ -473,7 +671,10 @@ def create_field_correction(
             detail="Document not found.",
         )
 
-    # Verify that the field belongs to this document.
+    # -----------------------------------------------------
+    # Verify field belongs to document
+    # -----------------------------------------------------
+
     extracted_field = db.scalar(
         select(ExtractedField).where(
             ExtractedField.id == field_id,
@@ -487,7 +688,9 @@ def create_field_correction(
             detail="Extracted field not found.",
         )
 
-    corrected_value = correction_data.corrected_value.strip()
+    corrected_value = (
+        correction_data.corrected_value.strip()
+    )
 
     if not corrected_value:
         raise HTTPException(
@@ -498,10 +701,20 @@ def create_field_correction(
     reason = None
 
     if correction_data.reason:
-        reason = correction_data.reason.strip() or None
+        reason = (
+            correction_data.reason.strip()
+            or None
+        )
 
-    # Store correction separately.
+    # -----------------------------------------------------
+    # Store correction separately
+    # -----------------------------------------------------
+    #
     # Never overwrite ExtractedField.original_value.
+    # This preserves the machine-generated value for
+    # auditability.
+    # -----------------------------------------------------
+
     correction = Correction(
         extracted_field_id=extracted_field.id,
         user_id=current_user.id,
@@ -511,6 +724,10 @@ def create_field_correction(
 
     db.add(correction)
 
+    # -----------------------------------------------------
+    # Audit correction
+    # -----------------------------------------------------
+
     db.add(
         AuditEvent(
             document_id=document.id,
@@ -518,7 +735,8 @@ def create_field_correction(
             event_type="FIELD_CORRECTED",
             details=(
                 f"Field={extracted_field.field_name}; "
-                f"original={extracted_field.original_value}; "
+                f"original="
+                f"{extracted_field.original_value}; "
                 f"corrected={corrected_value}"
             ),
         )
@@ -543,7 +761,10 @@ def get_document_audit_history(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    # Ownership check before exposing private audit data.
+    # -----------------------------------------------------
+    # Verify ownership before exposing audit information
+    # -----------------------------------------------------
+
     document = db.scalar(
         select(Document).where(
             Document.id == document_id,
