@@ -6,16 +6,18 @@ ENV TESSERACT_CMD=/usr/bin/tesseract
 
 WORKDIR /app
 
+# Install only the system package required for OCR.
+# opencv-python-headless does not require the full OpenGL stack.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
     tesseract-ocr \
-    libgl1 \
-    libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --disable-pip-version-check -r requirements.txt \
+    && rm -rf /root/.cache/pip
 
 COPY . .
 
