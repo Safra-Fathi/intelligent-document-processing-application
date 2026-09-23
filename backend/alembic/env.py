@@ -1,7 +1,7 @@
 from logging.config import fileConfig
 
-from sqlalchemy import engine_from_config, pool
 from alembic import context
+from sqlalchemy import engine_from_config, pool
 
 from app.core.config import settings
 from app.db.base import Base
@@ -17,11 +17,29 @@ from app.models.audit_event import AuditEvent  # noqa: F401
 
 config = context.config
 
-# Use the database URL from .env instead of storing
+
+def get_database_url() -> str:
+    """Return a SQLAlchemy URL configured to use Psycopg 3."""
+
+    database_url = settings.database_url
+
+    # Railway provides PostgreSQL URLs as postgresql://...
+    # Explicitly use Psycopg 3 because the project installs psycopg[binary].
+    if database_url.startswith("postgresql://"):
+        database_url = database_url.replace(
+            "postgresql://",
+            "postgresql+psycopg://",
+            1,
+        )
+
+    return database_url
+
+
+# Use the database URL from the environment instead of storing
 # credentials inside alembic.ini.
 config.set_main_option(
     "sqlalchemy.url",
-    settings.database_url,
+    get_database_url(),
 )
 
 if config.config_file_name is not None:
