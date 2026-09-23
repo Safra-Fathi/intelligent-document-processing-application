@@ -36,32 +36,35 @@ The application allows authenticated users to upload business documents such as 
 ## Application Screenshots
 
 ### User Registration
-
-![Registration page](docs/screenshots/01-register.png)
+<img width="597" height="852" alt="Register" src="https://github.com/user-attachments/assets/a801b93f-2764-46c2-90f8-44a09559b8ee" />
 
 ### User Login
 
-![Login page](docs/screenshots/02-login.png)
+<img width="656" height="772" alt="Sign in" src="https://github.com/user-attachments/assets/efa5e9b5-78d2-499b-8876-dbf139866107" />
+
 
 ### Document Dashboard
 
-![Document dashboard](docs/screenshots/03-dashboard.png)
+<img width="1855" height="851" alt="Dashboard" src="https://github.com/user-attachments/assets/5a5e3ec0-259d-406b-a44c-b0033fa7ddbf" />
 
 ### Document Processing Result
 
-![Document processing result](docs/screenshots/04-document-result.png)
+<img width="1616" height="872" alt="document-result" src="https://github.com/user-attachments/assets/35dc2ddf-5727-418b-9296-7d2de92e68e5" />
+
 
 ### Validation and Human Review
+<img width="1487" height="856" alt="validation-review" src="https://github.com/user-attachments/assets/e398d772-a028-4dd1-b343-ef8fd109a34e" />
 
-![Validation and review](docs/screenshots/05-validation-review.png)
+
 
 ### Human Correction
+<img width="1522" height="526" alt="human-correction" src="https://github.com/user-attachments/assets/df99b573-236b-4d3b-9c01-9aceaa8cd490" />
 
-![Human correction](docs/screenshots/06-human-correction.png)
 
 ### Audit History
 
-![Audit history](docs/screenshots/07-audit-history.png)
+<img width="1367" height="672" alt="audit-history" src="https://github.com/user-attachments/assets/ee9d9e90-503f-4bf9-b296-4e278029bfac" />
+
 
 ---
 
